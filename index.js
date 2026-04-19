@@ -34,6 +34,7 @@ const DEFAULT_ANALYSIS_SYSTEM_PROMPT = [
     'If a segment clearly belongs to another participant, place it in reroutedSegments with the correct speaker name and text.',
     'Do not reroute a segment merely because another participant is mentioned by name inside the expected speaker\'s dialogue or narration.',
     'Quoted content like "Sofia is dressing like a disco angel" stays with the expected speaker unless the text explicitly attributes that quote or action to Sofia.',
+    'A line such as "Not this time," Bob replied belongs to Bob even though Bob\'s name is outside the quote.',
     'Never write analysis prose outside the JSON object.',
 ].join(' ');
 
@@ -633,6 +634,7 @@ async function analyzeReplyWithLlm(context, expectedCharacter, candidateText, ba
         'Reroute rules:',
         `- Keep text on ${expectedCharacter.name} when it only mentions another participant by name.`,
         `- Example to keep: ${expectedCharacter.name} says, "Sofia is dressing like a disco angel." That is still ${expectedCharacter.name}'s message.`,
+        '- A quote may still belong to another speaker if the surrounding prose clearly attributes it, for example: "Not this time," Bob replied.',
         '- Only reroute when another participant is explicitly labeled as the speaker or is clearly the actor of a separate segment.',
         `Candidate reply:\n<reply>\n${candidateText}\n</reply>`,
         'Return a JSON object with these fields only:',

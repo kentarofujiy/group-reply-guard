@@ -29,6 +29,32 @@ export const ATTRIBUTION_REFERENCE_MARKERS = [
     /\b(?:addressing|replying|responding)\s+to\b/i,
 ];
 
+const DIALOGUE_ATTRIBUTION_VERBS = [
+    'said',
+    'says',
+    'asked',
+    'asks',
+    'replied',
+    'responded',
+    'answered',
+    'added',
+    'continued',
+    'called',
+    'shouted',
+    'whispered',
+    'murmured',
+    'muttered',
+    'snapped',
+    'hissed',
+    'cried',
+    'yelled',
+    'growled',
+];
+
+const DIALOGUE_VERB_PATTERN = DIALOGUE_ATTRIBUTION_VERBS.join('|');
+const QUOTED_DIALOGUE_PATTERN = /["“]([^"“”\n]+)["”]/g;
+const PROTECTED_BLOCK_PATTERN = /<think>[\s\S]*?<\/think>|```json\b[\s\S]*?```/gi;
+
 const OTHER_CHARACTER_REFERENCE_PATTERNS = [
     name => new RegExp(`\\b(?:to|toward|towards|at|with|for|about|around|near|beside|before|after)\\s+${escapeRegExp(name)}\\b`, 'i'),
     name => new RegExp(`\\b${escapeRegExp(name)}\\b\\s*,`, 'i'),
@@ -40,8 +66,35 @@ function uniqueStrings(values) {
     return Array.from(new Set(values.filter(Boolean).map(value => String(value).trim()).filter(Boolean)));
 }
 
+function protectSpecialBlocks(text) {
+    const blocks = [];
+    const source = String(text ?? '');
+    PROTECTED_BLOCK_PATTERN.lastIndex = 0;
+
+    const protectedText = source.replace(PROTECTED_BLOCK_PATTERN, (match) => {
+        const placeholder = `__GRG_PROTECTED_BLOCK_${blocks.length}__`;
+        blocks.push({ placeholder, content: match });
+        return placeholder;
+    });
+
+    PROTECTED_BLOCK_PATTERN.lastIndex = 0;
+    return { protectedText, blocks };
+}
+
+function restoreSpecialBlocks(text, blocks = []) {
+    let restored = String(text ?? '');
+
+    for (const block of blocks) {
+        restored = restored.replaceAll(block.placeholder, block.content);
+    }
+
+    return restored;
+}
+
 function stripQuotedDialogue(text) {
-    return String(text ?? '').replace(/["“][^"“”\n]*["”]/g, ' ');
+    const { protectedText, blocks } = protectSpecialBlocks(text);
+    const stripped = protectedText.replace(/["“][^"“”\n]*["”]/g, ' ');
+    return restoreSpecialBlocks(stripped, blocks);
 }
 
 function buildReferenceMatchers(names) {
@@ -59,6 +112,59 @@ function lineHasReferenceCue(line, matchers) {
     return matchers.some(({ patterns }) => patterns.some(pattern => pattern.test(unquotedLine)));
 }
 
+function extractQuotedDialogue(line) {
+    const source = String(line ?? '');
+    const segments = [];
+    QUOTED_DIALOGUE_PATTERN.lastIndex = 0;
+
+    let match;
+    while ((match = QUOTED_DIALOGUE_PATTERN.exec(source)) !== null) {
+        const text = normalizeReplyText(match[1] ?? '');
+        if (text) {
+            segments.push(text);
+        }
+    }
+
+    QUOTED_DIALOGUE_PATTERN.lastIndex = 0;
+    return segments;
+}
+
+function detectAttributedQuoteSpeaker(line, names) {
+    const source = String(line ?? '');
+    const quotes = extractQuotedDialogue(source);
+    if (!quotes.length) {
+        return null;
+    }
+
+    const outsideQuotes = stripQuotedDialogue(source);
+    const orderedNames = uniqueStrings(names).sort((left, right) => right.length - left.length);
+
+    for (const name of orderedNames) {
+        const escapedName = escapeRegExp(name);
+        const speakerBeforeVerb = new RegExp(
+            `\\b${escapedName}\\b(?:\\s*,)?\\s+(?:(?:\\w+ly)\\s+){0,2}(?:${DIALOGUE_VERB_PATTERN})\\b`,
+            'i',
+        );
+        const speakerAfterVerb = new RegExp(
+            `\\b(?:${DIALOGUE_VERB_PATTERN})\\b(?:\\s*,)?\\s+${escapedName}\\b`,
+            'i',
+        );
+        const possessiveCarrier = new RegExp(
+            `\\b${escapedName}(?:'s|’s)\\s+(?:(?:\\w+ly|\\w+ed|\\w+ing)\\s+){0,2}(?:voice|words|tone)\\b`,
+            'i',
+        );
+
+        if (speakerBeforeVerb.test(outsideQuotes) || speakerAfterVerb.test(outsideQuotes) || possessiveCarrier.test(outsideQuotes)) {
+            return {
+                speaker: name,
+                text: normalizeReplyText(quotes.join('\n')),
+            };
+        }
+    }
+
+    return null;
+}
+
 export function escapeRegExp(value) {
     return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -73,7 +179,8 @@ export function truncateText(text, maxLength = 320) {
 }
 
 export function normalizeReplyText(text) {
-    const lines = String(text ?? '')
+    const { protectedText, blocks } = protectSpecialBlocks(text);
+    const lines = String(protectedText ?? '')
         .replace(/\r/g, '')
         .split('\n')
         .map(line => line.replace(/\s+$/g, ''));
@@ -94,7 +201,7 @@ export function normalizeReplyText(text) {
         normalized.push(line);
     }
 
-    return normalized.join('\n').trim();
+    return restoreSpecialBlocks(normalized.join('\n').trim(), blocks);
 }
 
 function buildSpeakerMatchers(names) {
@@ -103,7 +210,7 @@ function buildSpeakerMatchers(names) {
         .map(name => ({
             name,
             explicit: new RegExp(`^\\s*[>*_~\"'\\[]*${escapeRegExp(name)}\\s*(?:[:\\-\\u2013\\u2014]|[>])\\s*`, 'i'),
-            action: new RegExp(`^\\s*[*_~\"']${escapeRegExp(name)}\\b\\s+`, 'i'),
+            action: new RegExp(`^\\s*[*_~]${escapeRegExp(name)}\\b\\s+`, 'i'),
         }));
 }
 
@@ -127,7 +234,7 @@ export function stripSpeakerPrefix(line, speakerName) {
         return source.replace(explicit, '$1').trim();
     }
 
-    const action = new RegExp(`^(\\s*[*_~\"'])${name}\\b\\s+`, 'i');
+    const action = new RegExp(`^(\\s*[*_~])${name}\\b\\s+`, 'i');
     if (action.test(source)) {
         return source.replace(action, '$1').trim();
     }
@@ -159,7 +266,8 @@ export function detectQualityIssues(text) {
         return issues;
     }
 
-    const meaningfulLines = normalized
+    const { protectedText } = protectSpecialBlocks(normalized);
+    const meaningfulLines = protectedText
         .split('\n')
         .map(line => line.trim())
         .filter(Boolean);
@@ -174,15 +282,15 @@ export function detectQualityIssues(text) {
         seenLines.add(key);
     }
 
-    if (/(\b\w+\b)(?:\s+\1){3,}/i.test(normalized)) {
+    if (/(\b\w+\b)(?:\s+\1){3,}/i.test(protectedText)) {
         issues.push('nonsensical_repetition');
     }
 
-    if (META_RESPONSE_MARKERS.some(pattern => pattern.test(normalized))) {
+    if (META_RESPONSE_MARKERS.some(pattern => pattern.test(protectedText))) {
         issues.push('meta_rewrite_response');
     }
 
-    if (QUALITY_MARKERS.some(pattern => pattern.test(normalized))) {
+    if (QUALITY_MARKERS.some(pattern => pattern.test(protectedText))) {
         issues.push('omniscient_or_meta_content');
     }
 
@@ -195,6 +303,7 @@ export function detectAttributionSignals({ text, expectedName, userNames = [], o
         return [];
     }
 
+    const { protectedText } = protectSpecialBlocks(normalized);
     const issues = [];
     const userList = uniqueStrings(userNames);
     const otherList = uniqueStrings(otherNames);
@@ -204,7 +313,7 @@ export function detectAttributionSignals({ text, expectedName, userNames = [], o
 
     let foundReference = false;
 
-    for (const line of normalized.split('\n')) {
+    for (const line of protectedText.split('\n')) {
         const trimmed = line.trim();
         if (!trimmed) {
             continue;
@@ -215,7 +324,8 @@ export function detectAttributionSignals({ text, expectedName, userNames = [], o
             continue;
         }
 
-        const hasUserReference = userMatchers.some(({ pattern }) => pattern.test(trimmed));
+        const unquotedLine = stripQuotedDialogue(trimmed);
+        const hasUserReference = userMatchers.some(({ pattern }) => pattern.test(unquotedLine));
         const hasOtherReference = lineHasReferenceCue(trimmed, otherMatchers);
 
         if (hasUserReference) {
@@ -229,7 +339,7 @@ export function detectAttributionSignals({ text, expectedName, userNames = [], o
         }
     }
 
-    if (foundReference || ATTRIBUTION_REFERENCE_MARKERS.some(pattern => pattern.test(normalized))) {
+    if (foundReference || ATTRIBUTION_REFERENCE_MARKERS.some(pattern => pattern.test(protectedText))) {
         if (issues.length > 0) {
             issues.push('ambiguous_multi_character_prose');
         }
@@ -244,10 +354,11 @@ export function hasSpeakerReferenceEvidence({ text, speakerName, allNames = [] }
         return false;
     }
 
+    const { protectedText } = protectSpecialBlocks(normalized);
     const names = uniqueStrings([speakerName, ...allNames]);
     const speakerMatchers = buildReferenceMatchers([speakerName]);
 
-    for (const line of normalized.split('\n')) {
+    for (const line of protectedText.split('\n')) {
         const trimmed = line.trim();
         if (!trimmed) {
             continue;
@@ -255,6 +366,11 @@ export function hasSpeakerReferenceEvidence({ text, speakerName, allNames = [] }
 
         const explicitSpeaker = detectExplicitSpeaker(trimmed, names);
         if (explicitSpeaker && explicitSpeaker.toLowerCase() === String(speakerName).toLowerCase()) {
+            return true;
+        }
+
+        const attributedQuote = detectAttributedQuoteSpeaker(trimmed, names);
+        if (attributedQuote && attributedQuote.speaker.toLowerCase() === String(speakerName).toLowerCase()) {
             return true;
         }
 
@@ -268,6 +384,7 @@ export function hasSpeakerReferenceEvidence({ text, speakerName, allNames = [] }
 
 export function sanitizeGeneratedReply({ text, expectedName, userNames = [], otherNames = [] }) {
     const source = normalizeReplyText(text);
+    const { protectedText, blocks } = protectSpecialBlocks(source);
     const issues = [];
     const reroutedSegments = [];
     const keepLines = [];
@@ -278,11 +395,19 @@ export function sanitizeGeneratedReply({ text, expectedName, userNames = [], oth
     let activeSpeaker = expectedName;
     let truncatedForUser = false;
 
-    for (const rawLine of source.split('\n')) {
+    for (const rawLine of protectedText.split('\n')) {
         if (!rawLine.trim()) {
             if (activeSpeaker === expectedName && keepLines.length > 0 && keepLines.at(-1) !== '') {
                 keepLines.push('');
             }
+            continue;
+        }
+
+        const trimmedLine = rawLine.trim();
+        const isProtectedBlock = blocks.some(block => block.placeholder === trimmedLine);
+        if (isProtectedBlock) {
+            keepLines.push(trimmedLine);
+            activeSpeaker = expectedName;
             continue;
         }
 
@@ -309,6 +434,28 @@ export function sanitizeGeneratedReply({ text, expectedName, userNames = [], oth
             continue;
         }
 
+        const attributedQuote = detectAttributedQuoteSpeaker(rawLine, names);
+        if (attributedQuote) {
+            activeSpeaker = attributedQuote.speaker;
+            const lowered = attributedQuote.speaker.toLowerCase();
+
+            if (userSet.has(lowered)) {
+                issues.push('user_content_truncated');
+                truncatedForUser = true;
+                break;
+            }
+
+            if (otherSet.has(lowered)) {
+                issues.push('other_character_removed');
+                pushReroutedLine(reroutedSegments, attributedQuote.speaker, attributedQuote.text || rawLine);
+                activeSpeaker = expectedName;
+                continue;
+            }
+
+            keepLines.push(rawLine.trimEnd());
+            continue;
+        }
+
         if (activeSpeaker && otherSet.has(activeSpeaker.toLowerCase())) {
             issues.push('other_character_removed');
             pushReroutedLine(reroutedSegments, activeSpeaker, rawLine);
@@ -318,7 +465,7 @@ export function sanitizeGeneratedReply({ text, expectedName, userNames = [], oth
         keepLines.push(rawLine.trimEnd());
     }
 
-    const cleanText = normalizeReplyText(keepLines.join('\n'));
+    const cleanText = restoreSpecialBlocks(normalizeReplyText(keepLines.join('\n')), blocks);
 
     if (truncatedForUser && !cleanText) {
         issues.push('empty_after_cleanup');
@@ -328,7 +475,10 @@ export function sanitizeGeneratedReply({ text, expectedName, userNames = [], oth
 
     return {
         cleanText,
-        reroutedSegments,
+        reroutedSegments: reroutedSegments.map(segment => ({
+            speaker: segment.speaker,
+            text: restoreSpecialBlocks(segment.text, blocks),
+        })),
         issues: uniqueStrings(issues),
         modified: cleanText !== source || reroutedSegments.length > 0,
     };
