@@ -9,6 +9,19 @@ Its main job is to catch two common failure modes:
 
 The implementation is intentionally split into a deterministic guard layer and an optional LLM repair layer. That split matters if you want to extend it safely.
 
+## Installation
+
+1. Copy or clone this repository into your SillyTavern `public/scripts/extensions/third-party/` directory as `group-reply-guard`.
+2. Reload SillyTavern and open **Extensions**.
+3. Enable **Group Reply Guard** in the extensions drawer.
+
+## Quick usage
+
+1. Start or open a **group chat**.
+2. Ensure **Enable group reply guarding** is checked in the extension settings.
+3. Generate replies as usual; Group Reply Guard will process incoming character messages automatically.
+4. Optionally click the shield button on a character message to run manual Analyze/Re-analyze.
+
 ## File map
 
 - `index.js`: main runtime, settings UI wiring, event listeners, LLM prompt construction, message mutation, rerouting, diagnostics.
@@ -434,7 +447,7 @@ Keep the deterministic guard in place even if you improve prompts. The current d
 - The extension is scoped to group chats only.
 - Speaker matching is name-based after draft resolution. If names collide, attribution can become ambiguous.
 - Only explicit speaker prefixes are deterministically rerouted. Ambiguous prose still needs LLM help.
-- The analysis prompt is not exposed in settings.
+- Analysis and rewrite system prompts are user-editable in settings, so prompt quality can vary between installs.
 - Diagnostics are in-memory only and cleared on chat change.
 - Message mutation and rerouting are separate phases, which means downstream extensions listening after render may observe already-mutated text but not yet-dispatched reroutes.
 
@@ -444,9 +457,9 @@ If you plan to extend this extension, these are the highest-value next steps:
 
 1. Add focused tests for `guard-utils.js`, especially `sanitizeGeneratedReply(...)`, because it carries most of the safety-critical logic.
 2. Move issue labels to a central enum-like object to reduce typo risk.
-3. Expose the analysis system prompt and maybe rewrite trigger controls in settings.
+3. Expose rewrite-trigger controls in settings for finer auto-rewrite tuning.
 4. Record confidence or provenance on rerouted segments so `/sendas` can be gated more conservatively.
-5. Add an integration hook or custom event after guard completion so other extensions can subscribe without scraping `message.extra`.
+5. Add more lifecycle hooks around analysis/rewrite phases so integrations can subscribe beyond the existing post-guard event.
 
 ## Practical rule for future changes
 
